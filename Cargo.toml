@@ -1,0 +1,14 @@
+[package]
+name = "kurswahl"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+Boa = "0.13.1"
+boa_engine = "0.16.0"
+boa_gc = "0.16.0"
+eframe = "0.20.1"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.91"
