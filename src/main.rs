@@ -94,6 +94,7 @@ struct Course {
     id: String,
     tags: HashSet<String>,
     num_semesters: Option<usize>,
+    semester_offset: usize,
     // add lessons per week
 }
 
@@ -114,11 +115,17 @@ impl Course {
         let id = id.into();
         let tags = tags.into_iter().map(|v| v.into()).collect();
         let num_semesters = None;
-        Self { name, tags, id, num_semesters }
+        let semester_offset = 0;
+        Self { name, tags, id, num_semesters, semester_offset }
     }
     
     fn with_semesters(mut self, num_semesters: usize) -> Self {
         self.num_semesters = Some(num_semesters);
+        self
+    }
+
+    fn with_offset(mut self, offset: usize) -> Self {
+        self.semester_offset = offset;
         self
     }
 
@@ -161,7 +168,7 @@ fn courses() -> Structure<Course> {
 
         Field::new("Sport", vec![
             Course::new::<&str>("Sport", "spo", vec![]),
-            Course::new::<&str>("Sport-Theorie", "spo-th", vec![]),
+            Course::new::<&str>("Sport-Theorie", "spo-th", vec![]).with_offset(2),
         ]),
 
         Field::new_max_usable("Ensemblemusik", vec![
@@ -179,7 +186,7 @@ fn courses() -> Structure<Course> {
             Course::new::<&str>("Finanzmathematik", "fin-mat", vec![]).with_semesters(2),
         ], 2),
         Field::new("Sport", vec![
-            Course::new::<&str>("Ski und Snowboard", "ski", vec![]).with_semesters(1),
+            Course::new::<&str>("Ski und Snowboard", "ski", vec![]).with_semesters(1).with_offset(1),
         ]),
     ], 4, "Hans-Carossa-Gymnasium", "1.0");
     structure
@@ -275,15 +282,18 @@ impl std::fmt::Display for Exam {
 struct App {
     structure: Structure<Course>,
     instance: Option<Structure<CourseInstance>>,
+    rules: JsRules,
 }
 
 impl App {
     fn new() -> Self {
         let structure = courses();
         let instance = Some(structure.clone().as_instance());
+        let rules = JsRules::from_js().expect("could not load rules");
         Self {
             structure,
             instance,
+            rules,
         }
     }
 }
@@ -331,27 +341,28 @@ impl App {
             if course.semesters.iter().any(|v| *v) {
                 course.semesters.iter_mut().for_each(|v| *v = false);
             } else {
+                // todo: fix all semesters selected even with offset
                 course.semesters.iter_mut().for_each(|v| *v = true);
             }
         }
 
         egui::ComboBox::from_id_source(ui.id().with(("lk_select", idx)))
             .width(100.0)
-            .selected_text(course.exam.map(|v| format!("{v}")).unwrap_or_else(|| format!("-")))
+            .selected_text(course.exam.map(|v| format!("{v}")).unwrap_or_else(|| format!("")))
         .show_ui(ui, |ui| {
             let exams = std::iter::once(None).chain(Exam::list().iter().map(|v| Some(*v)));
             for ex in exams {
                 // gray out already selected values
-                ui.selectable_value(&mut course.exam, ex, ex.map(|v| format!("{v}")).unwrap_or_else(|| format!("-")));
+                ui.selectable_value(&mut course.exam, ex, ex.map(|v| format!("{v}")).unwrap_or_else(|| format!("")));
             }
         });
 
         ui.columns(course.semesters.len(), |col| {
             for (i, (ui, semester)) in col.iter_mut().zip(course.semesters.iter_mut()).enumerate() {
-                if course.course.num_semesters.map(|v| i < v).unwrap_or(true) {
+                if course.course.num_semesters.map(|v| i < (v + course.course.semester_offset)).unwrap_or(true) && i >= course.course.semester_offset {
                     if ui.add_sized((ui.available_width(), 0.0), egui::Button::new(if *semester { "x" } else { "" })).clicked() {
                         *semester = !*semester;
-                    };
+                    }
                 }
 
             }
@@ -366,25 +377,29 @@ impl eframe::App for App {
         });
 
         // let max_width = frame.info().window_info.size.x - 650.0;
-        egui::SidePanel::right("constraint_panel").show(ctx, |ui| {
-            egui::TopBottomPanel::bottom("export_panel").frame(egui::Frame::none()).resizable(true).show_inside(ui, |ui| {
+        egui::SidePanel::right("constraint_panel").default_width(350.0).show(ctx, |ui| {
+            egui::TopBottomPanel::bottom("collapsible panel").frame(egui::Frame::none()).show_inside(ui, |ui| {
                 ui.add_space(10.0);
-                ui.heading("Export");
-                ui.allocate_space(ui.available_size());
+                ui.collapsing(egui::RichText::new("Hinweise").heading(), |ui| {
+                    ui.label("hinweise");
+                });
+
+                ui.collapsing(egui::RichText::new("Export").heading(), |ui| {
+                    ui.label("export");
+                });
+                ui.add_space(5.0);
             });
 
-            ui.add_space(10.0);
             ui.heading("Verpflichtungen");
             ui.group(|ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("rule_grid").num_columns(1).show(ui, |ui| {
-                        ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
-                        ui.label("Deutsch 4 Semester");
-                        ui.end_row();
-
-                        ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
-                        ui.label("eine Fremdsprache 4 Semester");
-                        ui.end_row();
+                        for (name, _, is_optional) in &*self.rules.rules.borrow() {
+                            let text = format!("{}{name}", if *is_optional { "(Optional) " } else { "" });
+                            ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                            ui.label(text);
+                            ui.end_row();
+                        }
                     });
                 });
                 ui.allocate_space(ui.available_size() - egui::vec2(0.0, 10.0));
