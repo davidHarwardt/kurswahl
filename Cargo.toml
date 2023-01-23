@@ -10,6 +10,7 @@ Boa = "0.13.1"
 boa_engine = "0.16.0"
 boa_gc = "0.16.0"
 eframe = "0.20.1"
+genpdf = "0.2.0"
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.91"
 

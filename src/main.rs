@@ -11,14 +11,6 @@ trait Rule {
     fn check(&self, data: &Structure<CourseInstance>) -> bool;
 }
 
-struct Rules {
-    rules: Vec<Box<dyn Rule>>,
-}
-
-impl Rules {
-
-}
-
 const INFO_SYMBOL: &str = "ℹ";
 
 #[derive(Debug, Clone)]
@@ -48,6 +40,10 @@ impl Structure<Course> {
 
     fn courses(&self) -> impl Iterator<Item = &Course> { self.fields.iter().flat_map(|v| v.courses.iter()) }
     fn courses_mut(&mut self) -> impl Iterator<Item = &mut Course> { self.fields.iter_mut().flat_map(|v| v.courses.iter_mut()) }
+}
+
+impl Structure<CourseInstance> {
+
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +82,14 @@ impl Field<CourseInstance> {
         let num_sem = self.get_num_semesters();
         self.max_usable.map(|v| v.min(num_sem)).unwrap_or(num_sem)
     }
+
+    fn get_course_by_id(&self, id: &str) -> Option<&CourseInstance> {
+        self.courses.iter().find(|v| v.course.id == id)
+    }
+
+    fn get_courses_by_tag(&self, tag: &str) -> Vec<&CourseInstance> {
+        self.courses.iter().filter(|v| v.course.tags.contains(tag)).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +99,7 @@ struct Course {
     tags: HashSet<String>,
     num_semesters: Option<usize>,
     semester_offset: usize,
-    // add lessons per week
+    lessons_per_week: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -107,6 +111,9 @@ struct CourseInstance {
 
 impl CourseInstance {
     fn get_num_semesters(&self) -> u32 { self.semesters.iter().map(|v| *v as u32).sum() }
+
+    fn is_lk(&self) -> bool { self.exam.map(|v| v.is_lk()).unwrap_or(false) }
+    fn has_block(&self, min_len: usize) -> bool { self.semesters.windows(min_len.min(self.semesters.len())).any(|v| v.iter().all(|v| *v)) }
 }
 
 impl Course {
@@ -116,7 +123,8 @@ impl Course {
         let tags = tags.into_iter().map(|v| v.into()).collect();
         let num_semesters = None;
         let semester_offset = 0;
-        Self { name, tags, id, num_semesters, semester_offset }
+        let lessons_per_week = None;
+        Self { name, tags, id, num_semesters, semester_offset, lessons_per_week }
     }
     
     fn with_semesters(mut self, num_semesters: usize) -> Self {
@@ -126,6 +134,11 @@ impl Course {
 
     fn with_offset(mut self, offset: usize) -> Self {
         self.semester_offset = offset;
+        self
+    }
+
+    fn with_lessons_per_week(mut self, lessons: usize) -> Self {
+        self.lessons_per_week = Some(lessons);
         self
     }
 
@@ -183,7 +196,7 @@ fn courses() -> Structure<Course> {
         Field::new_max_usable("Seminarkurse", vec![
             Course::new::<&str>("Neurowissenschaften", "neuro", vec![]).with_semesters(2),
             Course::new::<&str>("Doping", "doping", vec![]).with_semesters(2),
-            Course::new::<&str>("Finanzmathematik", "fin-mat", vec![]).with_semesters(2),
+            Course::new::<&str>("Finanzmathematik", "fima", vec![]).with_semesters(2),
         ], 2),
         Field::new("Sport", vec![
             Course::new::<&str>("Ski und Snowboard", "ski", vec![]).with_semesters(1).with_offset(1),
@@ -262,8 +275,15 @@ impl Exam {
         ]
     }
 
-    fn filtered<'a>(items: &'a [Self], tags: &'a [String]) -> impl Iterator<Item = &'a Self> {
-        std::iter::once(todo!())
+    fn filtered<'a>(items: &'a [Self], tags: &'a HashSet<String>) -> impl Iterator<Item = &'a Self> {
+        items.iter().filter(|v| v.is_lk() && tags.contains("lk") || !v.is_lk())
+    }
+
+    fn is_lk(&self) -> bool {
+        match self {
+            Self::Lf1 | Self::Lf2 => true,
+            _ => false,
+        }
     }
 }
 
@@ -299,14 +319,14 @@ impl App {
 }
 
 impl App {
-    fn draw_field(ui: &mut egui::Ui, field: &mut Field<CourseInstance>, idx: usize) {
+    fn draw_field(ui: &mut egui::Ui, field: &mut Field<CourseInstance>, idx: usize, is_mobile: bool) {
         ui.push_id(idx, |ui| {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.heading(format!("{}", field.name));
                 if let Some(num_sem) = field.max_usable {
                     ui.add(egui::Label::new(egui::RichText::new(INFO_SYMBOL).heading())
-                        .sense(egui::Sense::click()))
+                        .sense(egui::Sense::hover()))
                         .on_hover_text_at_pointer(format!("max. {} Semester einbringbar", num_sem));
                 }
             });
@@ -314,7 +334,7 @@ impl App {
             ui.group(|ui| {
                 egui::Grid::new("task_grid").num_columns(3).show(ui, |ui| {
                     for (i, course) in field.courses.iter_mut().enumerate() {
-                        Self::draw_course_instance(ui, course, i);
+                        Self::draw_course_instance(ui, course, i, is_mobile);
                         ui.end_row();
                     }
                 });
@@ -325,10 +345,12 @@ impl App {
     fn draw_grid_info(ui: &mut egui::Ui, num_courses: usize) {
         ui.group(|ui| {
             egui::Grid::new("info_grid").num_columns(3).show(ui, |ui| {
-                ui.add_sized((200.0, 20.0), egui::Label::new(format!("Kurs")));
-                ui.add_sized((100.0, 20.0), egui::Label::new("PrF"));
+                ui.add_sized((150.0, 20.0), egui::Label::new(format!("Kurs")));
+                ui.add_sized((75.0, 20.0), egui::Label::new("PrF"));
                 ui.columns(num_courses, |col| for (i, ui) in col.iter_mut().enumerate() {
-                    ui.add_sized((ui.available_width(), 20.0), egui::Label::new(format!("{}. Semester", i + 1)));
+                    let text = if ui.available_width() < 40.0 { format!("{}", i + 1) }
+                               else { format!("{}. Semester", i + 1) };
+                    ui.add_sized((ui.available_width(), 20.0), egui::Label::new(text));
                 });
                 ui.end_row();
             });
@@ -336,8 +358,8 @@ impl App {
         });
     }
 
-    fn draw_course_instance(ui: &mut egui::Ui, course: &mut CourseInstance, idx: usize) {
-        if ui.add_sized((200.0, 20.0), egui::Label::new(format!("{}", course.course.name)).sense(egui::Sense::click())).clicked() {
+    fn draw_course_instance(ui: &mut egui::Ui, course: &mut CourseInstance, idx: usize, is_mobile: bool) {
+        if ui.add_sized((150.0, 20.0), egui::Label::new(format!("{}", course.course.name)).wrap(true).sense(if is_mobile { egui::Sense::hover() } else { egui::Sense::click() })).clicked() {
             if course.semesters.iter().any(|v| *v) {
                 course.semesters.iter_mut().for_each(|v| *v = false);
             } else {
@@ -347,10 +369,11 @@ impl App {
         }
 
         egui::ComboBox::from_id_source(ui.id().with(("lk_select", idx)))
-            .width(100.0)
+            .width(75.0)
             .selected_text(course.exam.map(|v| format!("{v}")).unwrap_or_else(|| format!("")))
         .show_ui(ui, |ui| {
-            let exams = std::iter::once(None).chain(Exam::list().iter().map(|v| Some(*v)));
+
+            let exams = std::iter::once(None).chain(Exam::filtered(Exam::list(), &course.course.tags).map(|v| Some(*v)));
             for ex in exams {
                 // gray out already selected values
                 ui.selectable_value(&mut course.exam, ex, ex.map(|v| format!("{v}")).unwrap_or_else(|| format!("")));
@@ -368,49 +391,85 @@ impl App {
             }
         });
     }
+
+    fn draw_requirements(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().auto_shrink([true; 2]).show(ui, |ui| {
+            egui::Grid::new("rule_grid").num_columns(1).show(ui, |ui| {
+                for (name, _, is_optional) in &*self.rules.rules.borrow() {
+                    let text = format!("{}{name}", if *is_optional { "(Optional) " } else { "" });
+                    ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                    ui.label(text);
+                    ui.end_row();
+                }
+            });
+        });
+    }
+
+    fn draw_constraints(&mut self, ui: &mut egui::Ui) {
+        egui::TopBottomPanel::bottom("collapsible panel").frame(egui::Frame::none()).show_inside(ui, |ui| {
+            ui.add_space(10.0);
+
+            ui.collapsing(egui::RichText::new("Hinweise").heading(), |ui| {
+                ui.label("hinweise");
+            });
+
+            ui.collapsing(egui::RichText::new("Export").heading(), |ui| {
+                ui.label("export");
+            });
+            ui.add_space(5.0);
+        });
+
+        ui.heading("Verpflichtungen");
+        ui.group(|ui| {
+            self.draw_requirements(ui);
+            ui.allocate_space(ui.available_size() - egui::vec2(0.0, 10.0));
+        });
+
+    }
+
+    fn draw_constraints_mobile(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        
+        egui::CollapsingHeader::new(egui::RichText::new("Verpflichtungen").heading()).default_open(true).show(ui, |ui| {
+            self.draw_requirements(ui);
+        });
+
+        ui.collapsing(egui::RichText::new("Hinweise").heading(), |ui| {
+            ui.label("hinweise");
+        });
+
+        ui.collapsing(egui::RichText::new("Export").heading(), |ui| {
+            ui.label("export");
+        });
+        ui.add_space(5.0);
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        let area = ctx.available_rect();
+        let is_mobile = area.width() < 1100.0;
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::widgets::global_dark_light_mode_switch(ui);
         });
 
         // let max_width = frame.info().window_info.size.x - 650.0;
-        egui::SidePanel::right("constraint_panel").default_width(350.0).show(ctx, |ui| {
-            egui::TopBottomPanel::bottom("collapsible panel").frame(egui::Frame::none()).show_inside(ui, |ui| {
-                ui.add_space(10.0);
-                ui.collapsing(egui::RichText::new("Hinweise").heading(), |ui| {
-                    ui.label("hinweise");
-                });
-
-                ui.collapsing(egui::RichText::new("Export").heading(), |ui| {
-                    ui.label("export");
-                });
-                ui.add_space(5.0);
+        if !is_mobile {
+            egui::SidePanel::right("constraint_panel").default_width(350.0).max_width(area.width() - 650.0).show(ctx, |ui| {
+                self.draw_constraints(ui);
             });
-
-            ui.heading("Verpflichtungen");
-            ui.group(|ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("rule_grid").num_columns(1).show(ui, |ui| {
-                        for (name, _, is_optional) in &*self.rules.rules.borrow() {
-                            let text = format!("{}{name}", if *is_optional { "(Optional) " } else { "" });
-                            ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
-                            ui.label(text);
-                            ui.end_row();
-                        }
-                    });
-                });
-                ui.allocate_space(ui.available_size() - egui::vec2(0.0, 10.0));
+        } else {
+            egui::TopBottomPanel::bottom("constraint_panel")/*.max_height(area.height() / 2.0)*/.exact_height(area.height() / 5.0 * 2.0).show(ctx, |ui| {
+                self.draw_constraints_mobile(ui);
             });
-        });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             Self::draw_grid_info(ui, self.structure.num_semesters);
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 for (i, field) in self.instance.as_mut().unwrap().fields.iter_mut().enumerate() {
-                    Self::draw_field(ui, field, i);
+                    Self::draw_field(ui, field, i, is_mobile);
                 }
             });
         });
